@@ -38,10 +38,12 @@ Detections are merged by source MAC into a single per-drone state, since the sam
 
 **Raw data identification:**
 
-| Radio | Location | Identifier |
-|---|---|---|
-| BLE Advertising | AD type `0xFF` (Manufacturer Specific) | Company ID `0xFA0A` |
-| Wi-Fi Beacon | Information Element `0xDD` (Vendor Specific) | OUI `F1:F0:04` |
+| Radio           | Location                                     | Identifier                                  |
+| --------------- | --------------------------------------------- | -------------------------------------------- |
+| BLE Advertising | AD type `0x16` (Service Data — 16-bit UUID)  | UUID `0xFFFA` + AD Application Code `0x0D`   |
+| Wi-Fi Beacon    | Information Element `0xDD` (Vendor Specific) | OUI `FA:0B:BC` + `oui_type` `0x0D`           |
+
+> Verified against opendroneid's own reference transmitters: [`transmitter-linux/bluetooth.c`](https://github.com/opendroneid/transmitter-linux) (BLE) and [`opendroneid-core-c/libopendroneid/wifi.c`](https://github.com/opendroneid/opendroneid-core-c) (Wi-Fi). Both radios use the same pattern: an ASTM-assigned address-space identifier (UUID or OUI) followed by one byte, `0x0D`, marking Open Drone ID specifically within that space.
 
 **Decoded ODID message types (all of them, no pre-filtering):**
 
