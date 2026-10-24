@@ -185,3 +185,27 @@ Round-trip tests against opendroneid's encoder only prove symmetry with the same
 
 - GNSS: receiver position and absolute time (replaces the RTC as time source).
 - RF presence detection: LoRa, ExpressLRS and SiK control/telemetry links. These need separate radio hardware and are not Remote ID. They reveal that a transmitter is present, not who or where the drone is.
+
+## References
+
+Standards (not freely available):
+
+- ASTM F3411-22a, Standard Specification for Remote ID and Tracking
+- ASD-STAN prEN 4709-002, Direct Remote Identification
+
+Code:
+
+- [opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c): message formats, Wi-Fi NAN and Beacon frame layout (`opendroneid.h`, `odid_wifi.h`, `wifi.c`)
+- [opendroneid transmitter-linux](https://github.com/opendroneid/transmitter-linux): BLE frame layout
+- [opendroneid receiver-android](https://github.com/opendroneid/receiver-android): BT4/BT5, NAN and Beacon reception
+- [opendroneid wireshark-dissector](https://github.com/opendroneid/wireshark-dissector)
+- [sxjack/uav_electronic_ids](https://github.com/sxjack/uav_electronic_ids): ESP32 transmitter and receiver
+- [dump3411](https://github.com/ifnull/dump3411): Linux receiver, channel hopping defaults
+
+Hardware and regulation:
+
+- [ESP-IDF RF Coexistence, ESP32-C5](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c5/api-guides/coexist.html): Wi-Fi sniffer and BLE scan coexistence
+- [CAAS AS-10 Broadcast Remote Identification](https://www.caas.gov.sg/docs/default-source/default-document-library/as-10_broadcast-remote-identification.pdf): transmit rates and methods per EN 4709-002
+- [TBRD: TESLA Authenticated UAS Broadcast Remote ID](https://arxiv.org/pdf/2510.11343): Message Pack rate under F3411-22a
+- [US 2023/0294848, Off-Channel UAV Remote ID Beaconing](https://patents.justia.com/patent/20230294848): Beacon operating and social channels
+- [Drone Remote ID, btframework](https://www.btframework.com/droneremoteid.htm): BT5 Long Range sent together with BT4 Legacy (F3411-19)
