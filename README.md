@@ -149,7 +149,7 @@ Rules between the levels:
 - A Basic ID is not used as a key if IDType is 0 or reserved (5–15), or if UASID is empty or all zeros. Serial numbers can also be checked against the ANSI/CTA-2063-A format.
 - Operator ID and operator location are never keys. One operator can fly several drones.
 - A session without a valid Basic ID stays unattached and is shown as an unidentified source. It is never attached to an entity by position or time. Proximity may be shown in the UI as a hint only.
-- The entity position is chosen by Location timestamp across its sessions, not by receive time. An older position never replaces a newer one. The hour wrap is resolved against the receive time, modulo 3600 s.
+- The entity position is chosen by Location timestamp across its sessions, not by receive time. An older position never replaces a newer one. Hour wrap and fallback rules are described under [Time](#time).
 
 #### Conflicts
 
@@ -204,12 +204,58 @@ Sentinels are never shown as real values (e.g. a drone at 0°, 0°).
 
 ### Time
 
-The Location timestamp only covers the position within the current hour; the hour comes from the receiver clock. Before GNSS is available the MAX31329 RTC is the time source. RTC initialisation and drift handling are still open; the System message timestamp (absolute, seconds since 2019-01-01) can be used as a cross-check.
+#### Two clocks
+
+- Monotonic clock (`esp_timer`, µs): ordering of observations, session timeouts (30 s, 3 min) and duplicate windows. It never jumps.
+- Wall clock (UTC): hour wrap of Location timestamps and human-readable logs. It can jump when it is set or corrected.
+
+Timeouts and ordering never use the wall clock.
+
+#### Receive time
+
+Frames are timestamped on the C5 at reception (`rx_ctrl.timestamp` for Wi-Fi), not on the P4 after IPC, so buffering and transfer delay do not affect the receive time. The C5 timestamp is mapped to the P4 monotonic clock. The mapping is part of the IPC design.
+
+#### Wall clock source
+
+The MAX31329 RTC is kept in UTC and is the wall clock until GNSS is available. Clock quality is one of:
+
+- `unset`: RTC never set or lost power
+- `manual`: set by the user or over USB/serial
+- `rtc`: running from an earlier set
+- `gnss`: set from GNSS (later phase)
+
+While the clock is `unset`, Location timestamps are not used for ordering and the hour wrap is not resolved; the monotonic receive time is used instead.
+
+The RTC has ±5 ppm typical accuracy at 25 °C (about 0.4 s per day), more in the cold. This is enough for the hour wrap but not for latency measurement over weeks. In the GNSS phase the 1-PPS signal can drive the RTC CLKIN input. Sub-second time comes from the monotonic clock.
+
+#### Drone timestamps
+
+- Location timestamp: tenths of seconds after the full hour. The library only checks for `0xFFFF` when decoding (`decodeTimeStamp()`), so values above 36000 are rejected by SkyReach. The hour is taken from the wall clock, choosing the hour that puts the timestamp closest to the receive time (valid while the wall clock is within ±30 min of UTC).
+- If the Location timestamp is invalid or missing, ordering falls back to the monotonic receive time. Equal timestamps from different methods are the same position, not a new point.
+- System timestamp: seconds since 2019-01-01 UTC, only present from protocol version 2 (F3411-22). A value of 0 or `ProtoVersion` < 2 means no timestamp. The library does not check this. The transmitter clock can be wrong (for example before GNSS fix), so it is only used as a cross-check. The median over several drones can serve as a rough time source when the RTC is `unset`.
+- Auth page 0 timestamp uses the same epoch and the same rules.
+
+#### Latency flag
+
+With a set wall clock, receive time minus Location timestamp gives the delay. A delay well above `TSAccuracy` plus clock error is flagged (stale position, replay or wrong transmitter clock). The flag does not reject the observation.
+
+#### Logged time fields
+
+- Every observation: monotonic time (µs), UTC time with milliseconds, and clock quality.
+- Clock set and correction events: old time, new time and the monotonic instant. Earlier observations can then be corrected offline without rewriting the log.
+- File timestamps on the SD card come from the RTC.
+- GNSS phase: GPS time is converted to UTC (currently 18 leap seconds) before use.
+
+#### Open items to measure
+
+1. Offset and jitter between the C5 receive timestamp and the P4 clock over IPC.
+2. RTC drift over the operating temperature range.
+3. Share of real transmitters that send a System timestamp, and its accuracy.
 
 ### Logging
 
 - Every received ODID frame is logged as raw hex alongside the decoded result, so parser bugs and new message types can be reprocessed later.
-- Each record includes receive time, broadcast method, channel/PHY, RSSI, source MAC, message counter and `ProtoVersion`.
+- Each record includes receive time (monotonic and UTC, see [Time](#time)), broadcast method, channel/PHY, RSSI, source MAC, message counter and `ProtoVersion`.
 - Still to be defined: flush policy (data loss on power cut) and log rotation (FAT32 4 GB file limit).
 
 ### Security and privacy
@@ -254,6 +300,7 @@ Code:
 
 Hardware and regulation:
 
+- [MAX31329 datasheet](https://www.analog.com/en/products/max31329.html): RTC accuracy and CLKIN input
 - [ESP-IDF RF Coexistence, ESP32-C5](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c5/api-guides/coexist.html): Wi-Fi sniffer and BLE scan coexistence
 - [CAAS AS-10 Broadcast Remote Identification](https://www.caas.gov.sg/docs/default-source/default-document-library/as-10_broadcast-remote-identification.pdf): transmit rates and methods per EN 4709-002
 - [TBRD: TESLA Authenticated UAS Broadcast Remote ID](https://arxiv.org/pdf/2510.11343): Message Pack rate under F3411-22a
