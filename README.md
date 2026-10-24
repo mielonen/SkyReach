@@ -19,7 +19,7 @@ ASTM F3411 defines four broadcast methods. Manufacturers pick one or more, so th
 | BT4 Legacy Advertising | BLE 1M PHY, legacy advertising | BLE advertising channels 37/38/39 | one 25-byte message per advertisement |
 | BT5 Long Range | BLE Coded PHY, extended advertising | BLE advertising channels | Message Pack |
 | Wi-Fi NAN | Service Discovery action frame | 2.4 GHz ch 6, 5 GHz ch 149 | Message Pack |
-| Wi-Fi Beacon | Beacon frame, vendor-specific IE | any channel the transmitter uses, 2.4 or 5 GHz | Message Pack |
+| Wi-Fi Beacon | Beacon frame, vendor-specific IE | operating channel or social channel (ch 6 / ch 149) | Message Pack |
 
 BLE scanning therefore runs both a legacy 1M scan and an extended Coded PHY scan. NimBLE-Arduino support for Coded PHY scanning on the C5 is still to be verified.
 
@@ -74,13 +74,50 @@ Wi-Fi promiscuous (Beacon + NAN) ──┘    (UUID 0xFFFA /         ─► fram
 
 ### Radio scheduling
 
-The C5 has a single radio shared by Wi-Fi (2.4 and 5 GHz) and BLE (2.4 GHz, time-shared through coexistence). Detection probability is set by the channel plan, which is still to be designed:
+The C5 has one radio for Wi-Fi (2.4 and 5 GHz) and BLE. Espressif lists Wi-Fi sniffer RX together with BLE scan as supported but unstable on the C5 ([RF coexistence](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c5/api-guides/coexist.html)), and the coexistence guide does not cover 5 GHz. SkyReach therefore does not run both at once. A scheduler switches between Wi-Fi and BLE slots: the sniffer is off during BLE slots and BLE scanning is stopped during Wi-Fi slots.
 
-- NAN on ch 6 and ch 149
-- Beacon on whichever channel the transmitter chose, in either band
-- BLE scan windows (legacy and Coded) interleaved with Wi-Fi dwell time
+#### What the plan is based on
 
-Dwell times, the hopping order and the Wi-Fi/BLE time split must be defined and measured.
+- Dynamic messages are sent at 1 Hz or faster, static messages at least every 3 s (EN 4709-002).
+- NAN uses ch 6 and ch 149.
+- A Beacon is sent either on the transmitter's operating channel or on a social channel (ch 6 or ch 149). The Message Pack is typically repeated about once per second. Not confirmed from the standard text.
+- BLE legacy advertising uses ch 37/38/39. BT5 Long Range uses Coded PHY extended advertising, with the payload on secondary channels. The controller follows the aux pointers.
+- F3411-19 requires BT5 Long Range to be sent together with BT4 Legacy. If this still holds in F3411-22a, a legacy scan finds every BLE transmitter and the Coded scan only adds range.
+
+Dwell time has to match the transmit interval. A 200 ms dwell catches a 1 Hz beacon in only about 20 % of visits, so short-dwell hopping over all channels is not enough.
+
+#### Schedule
+
+The base cycle is 3 s, matching the static message period. The slot lengths below are starting values to be tuned from measurements.
+
+| Slot | Length | Covers |
+|---|---|---|
+| Wi-Fi ch 6 | 900 ms | NAN and social-channel Beacon, 2.4 GHz |
+| BLE | 900 ms | legacy scan; Coded scan in alternate cycles |
+| Wi-Fi ch 149 | 700 ms | NAN and social-channel Beacon, 5 GHz |
+| Search | 500 ms | one other channel per cycle, rotating over 2.4 GHz ch 1–13 and 5 GHz UNII-3 |
+
+With these values a 1 Hz transmitter is caught in roughly 70–90 % of cycles, giving a location update about every 3 s.
+
+The search slot is adaptive. A Beacon found outside the social channels adds its channel to a tracked list, together with the measured interval, and the search slot visits tracked channels first. A tracked channel with no ODID frames for 30 s is dropped.
+
+Frames from the same drone can arrive on several channels and methods. Duplicates are removed by message counter before state merge, and the scheduler does not count them as new detections.
+
+#### Metrics
+
+Each schedule is evaluated with:
+
+- time to first detection
+- location update interval per drone
+- missed frame rate per broadcast method, against a reference transmitter with a known interval
+
+#### Open items to measure
+
+1. Sniffer + BLE scan on the C5: frame loss with the built-in coexistence compared with the software slot scheduler.
+2. Channel switch time within 2.4 GHz and between bands. With esp-hosted (option A) the switch is an RPC from the P4, which adds latency.
+3. Whether ch 149 can be selected under the configured country code (`esp_wifi_set_country`), even for receive only.
+4. Beacon interval and channel of real transmitters (DJI, add-on modules). Reference transmitters: opendroneid [transmitter-linux](https://github.com/opendroneid/transmitter-linux) or the ESP32 transmitter in [uav_electronic_ids](https://github.com/sxjack/uav_electronic_ids).
+5. Whether BT5 transmitters always send legacy advertisements as well. If not, the Coded scan needs its own slot every cycle.
 
 ### State merge
 
