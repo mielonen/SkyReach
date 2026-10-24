@@ -123,10 +123,50 @@ Each schedule is evaluated with:
 
 The same drone sends from different MAC addresses over Wi-Fi and BLE, BLE addresses can rotate, and in BT4 Legacy mode Location packets carry no UAS ID. Merging is therefore two-level:
 
-1. Per transport: source MAC + broadcast method → links Location, System, etc. to the Basic ID seen from the same address.
-2. Across transports: UAS ID (Basic ID) is the primary key; a drone seen on several methods becomes one entry.
+1. Per source: (broadcast method, MAC) links Location, System, etc. to the Basic ID seen from the same address. Only BT4 Legacy needs this. Message Packs (BT5, NAN, Beacon) carry Basic ID and Location in the same frame.
+2. Across sources: (IDType, UASID) is the key. A drone seen on several methods becomes one entry.
 
-A drone may send up to five Basic ID messages with different ID types; all are kept.
+#### Keys
+
+- A drone entry holds a set of keys, one per Basic ID type (up to five). Two entries are merged when any key matches. Entries can merge late, for example when BLE first shows only the CAA registration and Wi-Fi only the serial number; both histories are kept.
+- A Basic ID is not used as a key if IDType is 0 or reserved (5–15), or if UASID is empty or all zeros. Such entries stay keyed by source. Serial numbers can also be checked against the ANSI/CTA-2063-A format.
+- Operator ID and operator location are never keys. One operator can fly several drones.
+
+#### Provisional entries
+
+A Location from a source with no Basic ID yet creates a provisional entry keyed by (broadcast method, MAC). It becomes a normal entry when a Basic ID arrives from the same source and expires after 10 s without one. A provisional entry is never attached to an existing drone by position or time. Proximity may be shown in the UI as a hint only.
+
+#### Duplicates and ordering
+
+- Duplicates are dropped by (broadcast method, MAC, message type, message counter). The counter is per transmitter and method, so the same content received over Wi-Fi and BLE counts as two observations of one drone, not as a duplicate.
+- The newest position is chosen by Location timestamp, not by receive time. An older position never replaces a newer one. The hour wrap is resolved against the receive time, modulo 3600 s.
+
+#### Conflicts
+
+- Two different UAS IDs from the same source within a short window are logged as an anomaly (spoofer, test tool or MAC collision). BT4 Location frames from that source are then ambiguous and are not attached to either drone without a flag.
+- If one UAS ID is seen at two positions that are physically impossible to reconcile (distance greater than max speed × time), positions are not averaged or overwritten. Each source keeps its own track under the drone, and the drone is flagged with conflicting sources.
+- Changes to static fields during a flight (Operator ID, UA type, System classification) are logged as events. The latest value is shown.
+
+#### Lifetime
+
+- No frames for 30 s: stale. No frames for 3 min: the flight session is closed.
+- The same key seen again later is the same drone with a new session.
+- Session ID and UTM UUID (ID types 3 and 4) change per flight by design. No link between flights is inferred.
+
+#### Known limits
+
+- A drone with both a built-in Remote ID and an add-on module broadcasts two serial numbers and shows up as two entries. They cannot be merged reliably.
+- An add-on module can be moved between aircraft, so a serial number identifies the transmitter, not the airframe.
+
+#### Logging
+
+Each raw frame is logged with its source (broadcast method, MAC) and the entry it was resolved to at that moment. Merges, provisional entry promotions and anomalies are logged as separate events, so the merge can be rerun offline with different rules.
+
+#### Open items to measure
+
+1. Whether BLE addresses stay fixed during a flight or rotate, and whether BT4 and BT5 advertising sets share an address.
+2. Whether NAN and Beacon use the same MAC, and whether the Wi-Fi MAC changes at power-up.
+3. How often Basic ID is sent relative to Location in BT4 Legacy mode. This sets the provisional entry timeout.
 
 ### Decoded messages
 
