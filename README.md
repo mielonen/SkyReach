@@ -230,7 +230,7 @@ The RTC has ±5 ppm typical accuracy at 25 °C (about 0.4 s per day), more in th
 
 #### Drone timestamps
 
-- Location timestamp: tenths of seconds after the full hour. The library only checks for `0xFFFF` when decoding (`decodeTimeStamp()`), so values above 36000 are rejected by SkyReach. The hour is taken from the wall clock, choosing the hour that puts the timestamp closest to the receive time (valid while the wall clock is within ±30 min of UTC).
+- Location timestamp: tenths of seconds after the full hour. The library only checks for `0xFFFF` when decoding (`decodeTimeStamp()`), so SkyReach treats values above 36000 as invalid. The raw value is still logged. The hour is taken from the wall clock, choosing the hour that puts the timestamp closest to the receive time (valid while the wall clock is within ±30 min of UTC).
 - If the Location timestamp is invalid or missing, ordering falls back to the monotonic receive time. Equal timestamps from different methods are the same position, not a new point.
 - System timestamp: seconds since 2019-01-01 UTC, only present from protocol version 2 (F3411-22). A value of 0 or `ProtoVersion` < 2 means no timestamp. The library does not check this. The transmitter clock can be wrong (for example before GNSS fix), so it is only used as a cross-check. The median over several drones can serve as a rough time source when the RTC is `unset`.
 - Auth page 0 timestamp uses the same epoch and the same rules.
@@ -241,8 +241,22 @@ With a set wall clock, receive time minus Location timestamp gives the delay. A 
 
 #### Logged time fields
 
-- Every observation: monotonic time (µs), UTC time with milliseconds, and clock quality.
-- Clock set and correction events: old time, new time and the monotonic instant. Earlier observations can then be corrected offline without rewriting the log.
+Original time values are never replaced by a computed UTC time. Each value is logged as received, and any derived time is stored in a separate field.
+
+Original values:
+
+- receive time: raw C5 timestamp, P4 monotonic time (µs) and the wall clock reading at reception
+- Location timestamp: raw 16-bit value (tenths of seconds after the hour, `0xFFFF` included)
+- System and Auth page 0 timestamps: raw 32-bit value (seconds since 2019-01-01)
+
+Derived values, each with the clock quality and the rule used:
+
+- receive time in UTC
+- Location time in UTC (hour resolved from the wall clock)
+- System and Auth time in UTC
+- latency (receive time minus Location time)
+
+Clock set and correction events are logged with old time, new time and the monotonic instant. Derived times can then be recomputed offline without touching the original values.
 - File timestamps on the SD card come from the RTC.
 - GNSS phase: GPS time is converted to UTC (currently 18 leap seconds) before use.
 
