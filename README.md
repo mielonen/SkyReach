@@ -43,7 +43,7 @@ The message counter must be skipped before decoding; it is also used to drop dup
 | Wi-Fi Beacon frame → messages | no receive function (build only) | IE walk, OUI/type check, skip counter, then `odid_message_process_pack()` |
 | BLE advertisement → messages | nothing | AD parsing, UUID/app-code check, skip counter, then `decodeOpenDroneID()` (BT4) or `odid_message_process_pack()` (BT5) |
 | Single message / Message Pack decoding | `decodeOpenDroneID()`, `decodeMessagePack()` | — |
-| Per-drone state across packets | no, `odid_message_process_pack()` re-initialises its `ODID_UAS_Data` on every call | merge into `drone_entry_t` |
+| Per-drone state across packets | no, `odid_message_process_pack()` re-initialises its `ODID_UAS_Data` on every call | transport sessions and drone entities, see [State merge](#state-merge) |
 | Protocol version / plausibility checks | no, version is not checked and any value 0–15 is accepted for enums | log `ProtoVersion` per message, flag implausible values |
 
 Build options: compile with `-DODID_BASIC_ID_MAX_MESSAGES=5` (the library maximum). With the default of 2, a third Basic ID type is silently dropped and a Message Pack containing more Basic IDs than the limit is rejected entirely.
@@ -67,7 +67,7 @@ ESP32-C5                                       ESP32-P4
 BLE scan (1M legacy + Coded ext.) ─┐
                                     ├─► ODID filtering ─► IPC ─► raw frame log (hex)
 Wi-Fi promiscuous (Beacon + NAN) ──┘    (UUID 0xFFFA /         ─► frame parsing + decode (opendroneid-core-c)
-  channel hopping                        OUI FA:0B:BC /         ─► state merge (drone_entry_t)
+  channel hopping                        OUI FA:0B:BC /         ─► state merge (session / entity)
                                          NAN service ID)        ─► SD logging (NDJSON, buffered)
                                                                 ─► LVGL UI (list / detail / status)
 ```
@@ -121,52 +121,62 @@ Each schedule is evaluated with:
 
 ### State merge
 
-The same drone sends from different MAC addresses over Wi-Fi and BLE, BLE addresses can rotate, and in BT4 Legacy mode Location packets carry no UAS ID. Merging is therefore two-level:
+The same drone sends from different MAC addresses over Wi-Fi and BLE, BLE addresses can rotate, and in BT4 Legacy mode Location packets carry no UAS ID. Data is therefore kept on three separate levels:
 
-1. Per source: (broadcast method, MAC) links Location, System, etc. to the Basic ID seen from the same address. Only BT4 Legacy needs this. Message Packs (BT5, NAN, Beacon) carry Basic ID and Location in the same frame.
-2. Across sources: (IDType, UASID) is the key. A drone seen on several methods becomes one entry.
+| Level | What it is | Key |
+|---|---|---|
+| Raw observation | one received frame, stored with its decoded content | receive time + source |
+| Transport session | observations from one radio source over time | (broadcast method, MAC) |
+| Drone entity | logical drone built from one or more transport sessions | set of (IDType, UASID) |
 
-#### Keys
+Rules between the levels:
 
-- A drone entry holds a set of keys, one per Basic ID type (up to five). Two entries are merged when any key matches. Entries can merge late, for example when BLE first shows only the CAA registration and Wi-Fi only the serial number; both histories are kept.
-- A Basic ID is not used as a key if IDType is 0 or reserved (5–15), or if UASID is empty or all zeros. Such entries stay keyed by source. Serial numbers can also be checked against the ANSI/CTA-2063-A format.
+1. Every observation belongs to exactly one transport session.
+2. A transport session belongs to at most one drone entity at a time. An unattached session is a valid state.
+3. Raw observations and their session IDs are the permanent record. Drone entities are a derived view and can be rebuilt from the log.
+
+#### Transport sessions
+
+- A session starts with the first frame from a (broadcast method, MAC) source.
+- It ends after 30 s without frames, or when the source starts sending a different UAS ID. A new session is then started for the new identity.
+- In BT4 Legacy mode the session links Location, System, etc. to the Basic ID sent from the same address. Message Packs (BT5, NAN, Beacon) carry Basic ID and Location in the same frame.
+- Duplicates are dropped within the session by (message type, message counter). The counter is per transmitter and method, so the same content received over Wi-Fi and BLE is two observations, not a duplicate.
+- Each session keeps its own position track.
+
+#### Drone entities
+
+- A session is attached to an entity when it has a valid Basic ID. An entity holds a set of keys, one per Basic ID type (up to five). Sessions are attached to the same entity when any key matches. Entities can merge late, for example when BLE first shows only the CAA registration and Wi-Fi only the serial number.
+- A Basic ID is not used as a key if IDType is 0 or reserved (5–15), or if UASID is empty or all zeros. Serial numbers can also be checked against the ANSI/CTA-2063-A format.
 - Operator ID and operator location are never keys. One operator can fly several drones.
-
-#### Provisional entries
-
-A Location from a source with no Basic ID yet creates a provisional entry keyed by (broadcast method, MAC). It becomes a normal entry when a Basic ID arrives from the same source and expires after 10 s without one. A provisional entry is never attached to an existing drone by position or time. Proximity may be shown in the UI as a hint only.
-
-#### Duplicates and ordering
-
-- Duplicates are dropped by (broadcast method, MAC, message type, message counter). The counter is per transmitter and method, so the same content received over Wi-Fi and BLE counts as two observations of one drone, not as a duplicate.
-- The newest position is chosen by Location timestamp, not by receive time. An older position never replaces a newer one. The hour wrap is resolved against the receive time, modulo 3600 s.
+- A session without a valid Basic ID stays unattached and is shown as an unidentified source. It is never attached to an entity by position or time. Proximity may be shown in the UI as a hint only.
+- The entity position is chosen by Location timestamp across its sessions, not by receive time. An older position never replaces a newer one. The hour wrap is resolved against the receive time, modulo 3600 s.
 
 #### Conflicts
 
-- Two different UAS IDs from the same source within a short window are logged as an anomaly (spoofer, test tool or MAC collision). BT4 Location frames from that source are then ambiguous and are not attached to either drone without a flag.
-- If one UAS ID is seen at two positions that are physically impossible to reconcile (distance greater than max speed × time), positions are not averaged or overwritten. Each source keeps its own track under the drone, and the drone is flagged with conflicting sources.
+- A source switching to a different UAS ID within a short window is logged as an anomaly (spoofer, test tool or MAC collision). The session split keeps BT4 Location frames from being attached to the wrong drone.
+- If sessions of one entity report positions that are physically impossible to reconcile (distance greater than max speed × time), positions are not averaged or overwritten. The session tracks stay separate and the entity is flagged with conflicting sources.
 - Changes to static fields during a flight (Operator ID, UA type, System classification) are logged as events. The latest value is shown.
 
 #### Lifetime
 
-- No frames for 30 s: stale. No frames for 3 min: the flight session is closed.
-- The same key seen again later is the same drone with a new session.
+- An entity is stale when none of its sessions has received frames for 30 s. After 3 min the flight is closed.
+- The same key seen again later is the same entity with a new flight.
 - Session ID and UTM UUID (ID types 3 and 4) change per flight by design. No link between flights is inferred.
 
 #### Known limits
 
-- A drone with both a built-in Remote ID and an add-on module broadcasts two serial numbers and shows up as two entries. They cannot be merged reliably.
+- A drone with both a built-in Remote ID and an add-on module broadcasts two serial numbers and shows up as two entities. They cannot be merged reliably.
 - An add-on module can be moved between aircraft, so a serial number identifies the transmitter, not the airframe.
 
 #### Logging
 
-Each raw frame is logged with its source (broadcast method, MAC) and the entry it was resolved to at that moment. Merges, provisional entry promotions and anomalies are logged as separate events, so the merge can be rerun offline with different rules.
+Each raw observation is logged with its session ID. Session start and end, session-to-entity attachments, entity merges and anomalies are logged as separate events, so entities can be rebuilt offline with different rules.
 
 #### Open items to measure
 
 1. Whether BLE addresses stay fixed during a flight or rotate, and whether BT4 and BT5 advertising sets share an address.
 2. Whether NAN and Beacon use the same MAC, and whether the Wi-Fi MAC changes at power-up.
-3. How often Basic ID is sent relative to Location in BT4 Legacy mode. This sets the provisional entry timeout.
+3. How often Basic ID is sent relative to Location in BT4 Legacy mode. This sets how long a BT4 session stays unattached.
 
 ### Decoded messages
 
